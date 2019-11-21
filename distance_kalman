@@ -1,0 +1,96 @@
+import time, math, datetime, prctl
+import numpy as np
+from os import getcwd
+from threading import Thread
+from bluepy.btle import Scanner, DefaultDelegate
+
+
+class KalmanFilter(object):
+    def __init__(self, process_variance,estimated_measurement_variance):
+        self.process_variance = process_variance
+        self.estimated_measurement_variance = estimated_measurement_variance
+        self.posteri_estimate = 1.0
+        self.posteri_error_estimate = 2.0
+
+    def input_latest_noisy_measurement(self, measurement):
+        priori_estimate = self.posteri_estimate
+        priori_error_estimate = self.posteri_error_estimate + self.process_variance
+
+        blending_factor = priori_error_estimate / (priori_error_estimate + self.estimated_measurement_variance)
+        self.posteri_estimate = priori_estimate + blending_factor * (measurement - priori_estimate)
+        self.posteri_error_estimate = (1 - blending_factor) * priori_error_estimate
+
+    def get_latest_estimated_measurement(self):
+        return self.posteri_estimate
+
+
+class ScanDelegate(DefaultDelegate):
+    def __init__(self):
+        self.RSSI = self.DEV = self.dist = self.dist_kal = 0
+        self.stoppped = False
+
+        self.process_variance = 1e-3
+        self.estimated_measurement_variance = 0.25 ** 2 
+        self.kalman_filter = KalmanFilter(self.process_variance, self.estimated_measurement_variance)
+        DefaultDelegate.__init__(self)
+        self.scanner = Scanner()
+
+    def stop(self):
+        self.stopped = True
+
+    def start(self):
+        # start the thread to read frames from the device output
+        Thread(target=self.update, name="iBeacon").start()
+        print("Staring ibeacon")
+        return self
+
+    def distance(self, n=2.0, txpower=53):
+        return (abs(self.RSSI)/(10.0*n*math.log10(math.exp(1)))) - (txpower/(10.0*n*math.log10(math.exp(1)))) # convert RSSI to Distance
+
+    def update_file(self):
+        f = open('ibeacon.txt', 'w')
+        ts = time.time()
+        st = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
+        string = '%s\t%2.2f' % (st, self.dist_kal)
+        f.write(string)
+        f.close()
+
+    def update(self):
+        prctl.set_name("iBeacon")
+        count = 0
+        while(not self.stoppped):
+            try:
+                devices = self.scanner.scan(0.20)
+                for dev in devices:
+                    # print(dev.addr)
+                    if dev.addr == '00:15:83:00:81:f0':
+                        self.RSSI = dev.rssi
+                        self.DEV = dev.addr
+                        self.dist = self.distance()
+                        self.kalman_filter.input_latest_noisy_measurement(self.dist)
+                        self.dist_kal = self.kalman_filter.get_latest_estimated_measurement()
+                        self.update_file()
+                        count = 0
+                        #print "Device %s, RSSI=%d dB" % (dev.addr,dev.rssi)
+            except:
+                self.dist_kal = 0
+                if count >= 4:
+                    print "no ibeacon found"
+                    self.update_file()
+                count += 1
+                time.sleep(1)
+
+class iBeacon():
+    def __init__(self):
+        self.scan = ScanDelegate()
+        self.scanner = self.scan.scanner.withDelegate(self.scan)
+        self.scan.start()
+
+if __name__ == "__main__":
+
+
+    beacon = iBeacon()
+
+    while(1):
+        print "address:", beacon.scan.DEV, "RSSI:", beacon.scan.RSSI, "distance:", beacon.scan.dist, "kalman distance:", beacon.scan.dist_kal
+        time.sleep(0.5)
